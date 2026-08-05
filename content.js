@@ -2,7 +2,8 @@
 // Runs in the module page (top frame) AND in Content Controller frames.
 // - Top frame: shows the floating download button.
 // - Vault iframe: on request, re-fetches the file same-origin (the browser
-//   attaches the Referer + cookies automatically) and saves it as a blob.
+//   attaches the Referer + cookies automatically) and hands the bytes to
+//   the background worker, which performs the actual save.
 
 const BTN_ID = 'aws-custom-download-btn';
 const isTopFrame = () => window === window.top;
@@ -105,13 +106,21 @@ function toFetchInit(headerPairs) {
 async function fetchAndDownload(url, headers) {
     const resp = await fetch(url, { headers: toFetchInit(headers), credentials: 'include' });
     if (!resp.ok) throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
+
+    // chrome.downloads is NOT available in content scripts — send the bytes
+    // to the background worker, which shows the save-as dialog and saves.
     const blob = await resp.blob();
-    const objectUrl = URL.createObjectURL(blob);
-    await chrome.downloads.download({
-        url: objectUrl,
+    const buffer = await blob.arrayBuffer();
+    const reply = await chrome.runtime.sendMessage({
+        action: 'save_blob',
+        url,
+        data: buffer,
         filename: guessFilename(url, resp),
-        saveAs: true
+        mimeType: blob.type
     });
+    if (!reply || !reply.ok) {
+        throw new Error((reply && reply.error) || 'background failed to save the blob');
+    }
     return { ok: true };
 }
 

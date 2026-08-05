@@ -12,7 +12,9 @@
 //      this tier is SKIPPED — the API can never send a Referer, so the
 //      download would only 403.
 //   B) Re-fetch from inside the SCORM iframe (same-origin → the browser
-//      attaches the Referer + cookies automatically) → save the blob.
+//      attaches the Referer + cookies automatically). Content scripts
+//      CANNOT call chrome.downloads, so the iframe hands the bytes back
+//      to this worker via the 'save_blob' message and the worker saves.
 //   C) Worker fetch with credentials:'include' — last resort, no Referer.
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -58,6 +60,11 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
     (details) => {
         if (!isTarget(details.url) || !details.requestHeaders) return;
 
+        // Ignore our OWN requests (worker fetch, iframe re-fetch). Without
+        // this, the 403s from our Referer-less worker fetch would overwrite
+        // the captured entry and flip needsReferer to false.
+        if (details.initiator && details.initiator.startsWith('chrome-extension://')) return;
+
         const hadReferer = details.requestHeaders.some(
             (h) => h.name && h.name.toLowerCase() === 'referer'
         );
@@ -88,8 +95,18 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
     ["requestHeaders", "extraHeaders"]
 );
 
-// ── 2. Button click handler ──────────────────────────────────────────────────
+// ── 2. Messages from content scripts ─────────────────────────────────────────
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    if (request.action === 'save_blob' && request.data) {
+        // Bytes fetched by the iframe content script — save them here,
+        // because chrome.downloads is not available in content scripts.
+        const tabId = sender.tab ? sender.tab.id : -1;
+        saveBlob(request, tabId)
+            .then(() => sendResponse({ ok: true }))
+            .catch((err) => sendResponse({ ok: false, error: String(err) }));
+        return true;
+    }
+
     if (request.action !== 'download' || !request.url) return;
     const tabId = sender.tab ? sender.tab.id : -1;
     download(request.url, tabId)
@@ -100,6 +117,17 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         });
     return true; // async response
 });
+
+async function saveBlob(request, tabId) {
+    const blob = new Blob([request.data], { type: request.mimeType || 'application/pdf' });
+    const objectUrl = URL.createObjectURL(blob);
+    await chrome.downloads.download({
+        url: objectUrl,
+        filename: request.filename || 'course-material.pdf',
+        saveAs: true
+    });
+    if (tabId > -1) notify(tabId, { action: 'download_done', url: request.url || '' });
+}
 
 async function download(url, tabId) {
     const entry = await getStored(url, LATEST_KEY);

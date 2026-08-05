@@ -38,7 +38,7 @@ The actual PDF URL is never in the module page's HTML — AWS Academy loads it d
 2. **Content script** receives the URL and injects a fixed-position button.
 3. Clicking the button tries three download paths in order:
    - **Native** — `chrome.downloads.download()` with replayed headers (only headers XHR allows — `Referer`/`Origin`/`Sec-*` are rejected by the API, so they're filtered out).
-   - **Iframe re-fetch** — the vault iframe re-fetches the file same-origin, where the browser attaches `Referer` + cookies automatically, then saves the blob.
+   - **Iframe re-fetch** — the vault iframe re-fetches the file same-origin, where the browser attaches `Referer` + cookies automatically, then hands the bytes to the worker to save (content scripts can't call `chrome.downloads`).
    - **Worker fetch** — `fetch()` with `credentials: 'include'` + replayed headers, saved as a blob.
 
 ## 📦 Installation
