@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Course Material Downloader",
-  "version": "1.2",
+  "version": "1.3",
   "description": "Automatically adds a download button when course PDFs are detected on Canvas/Instructure pages.",
   "permissions": [
     "downloads",

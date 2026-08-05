@@ -2,15 +2,18 @@
 //  Course Material Downloader — background worker
 //
 //  Vault files are protected: they need the original request's context
-//  (Referer, cookies, custom tokens). Three download tiers:
+//  (Referer, cookies, custom tokens). Download tiers:
 //
 //   A) Native chrome.downloads.download() with replayable headers.
 //      NOTE: downloads API headers are "restricted to those allowed by
-//      XMLHttpRequest" — passing Referer/Origin/Sec-Fetch-* makes the call
-//      THROW ("failed to start"). Those are filtered out below.
+//      XMLHttpRequest" — passing Referer/User-Agent/Sec-* makes the call
+//      THROW ("Unsafe request header name"). Those are filtered out.
+//      If the original request carried a Referer (vaults that check it),
+//      this tier is SKIPPED — the API can never send a Referer, so the
+//      download would only 403.
 //   B) Re-fetch from inside the SCORM iframe (same-origin → the browser
-//      sends Referer + cookies automatically; custom tokens replayed).
-//   C) Worker fetch with credentials:'include' + replayable headers.
+//      attaches the Referer + cookies automatically) → save the blob.
+//   C) Worker fetch with credentials:'include' — last resort, no Referer.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const TARGET_RE = /\.pdf|contentcontroller\.com\/vault\//i;
@@ -18,7 +21,7 @@ const LATEST_KEY = '_latest';
 
 // XHR-forbidden headers — the downloads API and fetch() refuse to set these.
 const FORBIDDEN_HEADERS =
-    /^(accept-charset|accept-encoding|access-control-request-(headers|method)|connection|content-length|cookie|cookie2|date|dnt|expect|host|keep-alive|origin|permissions-policy|referer|te|trailer|transfer-encoding|upgrade|via|x-http-method(-override)?)$/i;
+    /^(accept-charset|accept-encoding|access-control-request-(headers|method)|connection|content-length|cookie|cookie2|date|dnt|expect|host|keep-alive|origin|permissions-policy|referer|te|trailer|transfer-encoding|upgrade|user-agent|via|x-http-method(-override)?)$/i;
 
 const isTarget = (url) => TARGET_RE.test(url);
 
@@ -40,14 +43,29 @@ function sanitizeHeaders(requestHeaders) {
     return out;
 }
 
-// ── 1. Capture the original request: URL + replayable headers + frame ────────
+// fetch() needs a plain {name: value} record — NOT the API's [{name, value}]
+// array. Passing the array throws "object must have a callable @@iterator".
+function toFetchInit(headerPairs) {
+    const out = {};
+    for (const h of headerPairs || []) {
+        if (h && h.name && h.value != null) out[h.name] = h.value;
+    }
+    return out;
+}
+
+// ── 1. Capture the original request: URL + headers + frame + referer flag ───
 chrome.webRequest.onBeforeSendHeaders.addListener(
     (details) => {
         if (!isTarget(details.url) || !details.requestHeaders) return;
 
+        const hadReferer = details.requestHeaders.some(
+            (h) => h.name && h.name.toLowerCase() === 'referer'
+        );
+
         const entry = {
             url: details.url,
             headers: sanitizeHeaders(details.requestHeaders),
+            needsReferer: hadReferer,
             frameId: details.frameId != null ? details.frameId : -1,
             time: Date.now()
         };
@@ -56,7 +74,7 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
             .catch(() => {});
 
         console.info(
-            `[CourseDownloader] captured ${entry.headers.length} replayable headers for ${details.url.slice(0, 120)}`
+            `[CourseDownloader] captured ${entry.headers.length} headers (referer: ${hadReferer}) for ${details.url.slice(0, 120)}`
         );
 
         if (details.tabId > -1) {
@@ -87,8 +105,14 @@ async function download(url, tabId) {
     const entry = await getStored(url, LATEST_KEY);
     const headers = (entry && entry.headers) || [];
 
+    // Vault checks Referer → native tier would only 403 (and pollute the
+    // downloads shelf with a failed item). Go straight to the fetch tiers.
+    if (entry && entry.needsReferer) {
+        console.info('[CourseDownloader] request carried a Referer — skipping native tier');
+        return downloadViaFetch(url, tabId, headers);
+    }
+
     // A) Native download — no re-fetch, native progress in the shelf.
-    //    Try with headers, then without (a single bad header kills the call).
     for (const hdrs of [headers, []]) {
         try {
             const id = await chrome.downloads.download({ url, headers: hdrs, saveAs: true });
@@ -99,7 +123,6 @@ async function download(url, tabId) {
         }
     }
 
-    // A failed to even start → go straight to the fetch tiers.
     return downloadViaFetch(url, tabId, headers);
 }
 
@@ -113,7 +136,7 @@ function watchNative(downloadId, url, tabId, headers) {
         } else if (delta.state.current === 'interrupted') {
             chrome.downloads.onChanged.removeListener(onChanged);
             const err = (delta.error && delta.error.current) || 'UNKNOWN';
-            if (err === 'USER_CANCELED') return; // user closed the save-as dialog
+            if (err === 'USER_CANCELED') return;
             console.warn(`[CourseDownloader] native download interrupted (${err}) — retrying via fetch`);
             downloadViaFetch(url, tabId, headers).catch((e) => {
                 console.error('[CourseDownloader] fetch fallback failed:', e);
@@ -128,9 +151,9 @@ async function downloadViaFetch(url, tabId, headers) {
     const entry = await getStored(url, LATEST_KEY);
     const frameId = entry && entry.frameId > 0 ? entry.frameId : null;
 
-    // B) Re-fetch from inside the vault iframe. Same-origin there, so the
-    //    browser attaches Referer + cookies automatically — exactly the
-    //    context the server saw for the original request.
+    // B) Re-fetch from inside the vault iframe. The vault URL is same-origin
+    //    with the SCORM player page, so the browser attaches the full player
+    //    URL as Referer + all cookies — exactly what the successful curl did.
     if (tabId > -1 && frameId) {
         try {
             const resp = await chrome.tabs.sendMessage(
@@ -144,17 +167,14 @@ async function downloadViaFetch(url, tabId, headers) {
             }
             console.warn('[CourseDownloader] iframe fetch refused:', resp && resp.error);
         } catch (err) {
-            console.warn('[CourseDownloader] iframe fetch unavailable (no content script in frame):', err);
+            console.warn('[CourseDownloader] iframe fetch unavailable:', err);
         }
     }
 
-    // C) Worker fetch — cookies + replayable headers, no Referer.
-    for (const opts of [
-        { headers, credentials: 'include' },
-        { credentials: 'include' }
-    ]) {
+    // C) Worker fetch — cookies + replayable headers, but NO Referer.
+    for (const init of [toFetchInit(headers), {}]) {
         try {
-            const resp = await fetch(url, opts);
+            const resp = await fetch(url, { headers: init, credentials: 'include' });
             if (!resp.ok) throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
             const blob = await resp.blob();
             const objectUrl = URL.createObjectURL(blob);

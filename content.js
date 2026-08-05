@@ -2,7 +2,7 @@
 // Runs in the module page (top frame) AND in Content Controller frames.
 // - Top frame: shows the floating download button.
 // - Vault iframe: on request, re-fetches the file same-origin (the browser
-//   sends Referer + cookies automatically) and saves it as a blob.
+//   attaches the Referer + cookies automatically) and saves it as a blob.
 
 const BTN_ID = 'aws-custom-download-btn';
 const isTopFrame = () => window === window.top;
@@ -44,7 +44,6 @@ function addDownloadButton(pdfUrl) {
         chrome.runtime.sendMessage({ action: 'download', url: pdfUrl })
             .then((resp) => {
                 if (resp && resp.ok) {
-                    // Background sends download_done / download_error events too.
                     setTimeout(() => setText('📥 Download Course PDF'), 20000);
                 } else {
                     const err = (resp && resp.error) || 'unknown error';
@@ -53,8 +52,7 @@ function addDownloadButton(pdfUrl) {
                 }
             })
             .catch((err) => {
-                // "Extension context invalidated" → page must be refreshed
-                // after the extension is reloaded.
+                // "Extension context invalidated" → refresh the page after reloading the extension.
                 console.error('[CourseDownloader] message error:', err);
                 failButton(String(err));
             });
@@ -94,9 +92,18 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 });
 
 // Same-origin fetch inside the vault iframe: the browser attaches the
-// Referer and cookies the server expects, and we replay custom tokens.
+// Referer (the player page URL) and cookies the server expects.
+// headers arrive as [{name, value}] → convert to a plain record for fetch().
+function toFetchInit(headerPairs) {
+    const out = {};
+    for (const h of headerPairs || []) {
+        if (h && h.name && h.value != null) out[h.name] = h.value;
+    }
+    return out;
+}
+
 async function fetchAndDownload(url, headers) {
-    const resp = await fetch(url, { headers, credentials: 'include' });
+    const resp = await fetch(url, { headers: toFetchInit(headers), credentials: 'include' });
     if (!resp.ok) throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
     const blob = await resp.blob();
     const objectUrl = URL.createObjectURL(blob);
