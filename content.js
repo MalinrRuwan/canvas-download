@@ -26,28 +26,41 @@ function addDownloadButton(pdfUrl) {
         transition: transform 0.2s, background-color 0.2s;
     `;
 
+    const setText = (t) => { btn.innerHTML = t; };
+
     // Add hover effects
     btn.onmouseover = () => { btn.style.transform = 'scale(1.05)'; };
     btn.onmouseout = () => { btn.style.transform = 'scale(1)'; };
 
     // When clicked, tell the background script to download the file
+    // (the background worker replays the original request headers — the
+    // vault rejects header-less downloads)
     btn.addEventListener('click', () => {
-        btn.innerHTML = '⏳ Downloading...';
-        chrome.runtime.sendMessage({ action: 'download', url: pdfUrl });
-
-        // Reset button text after a short delay
-        setTimeout(() => {
-            btn.innerHTML = '📥 Download Course PDF';
-        }, 2000);
+        setText('⏳ Downloading...');
+        chrome.runtime.sendMessage({ action: 'download', url: pdfUrl })
+            .then((resp) => {
+                if (!resp || !resp.ok) setText('⚠️ Failed to start download');
+                else setTimeout(() => setText('📥 Download Course PDF'), 15000);
+            })
+            .catch(() => setText('⚠️ Failed to start download'));
     });
 
     document.body.appendChild(btn);
 }
 
 // Listen for messages from the background script
-chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((request) => {
     if (request.action === 'found_pdf') {
         // The background script found the PDF URL in the network traffic
         addDownloadButton(request.url);
+    } else if (request.action === 'download_done') {
+        const btn = document.getElementById('aws-custom-download-btn');
+        if (btn) btn.innerHTML = '✅ Saved — check your downloads';
+    } else if (request.action === 'download_error') {
+        const btn = document.getElementById('aws-custom-download-btn');
+        if (btn) {
+            btn.innerHTML = '⚠️ Download failed — see console';
+            btn.style.backgroundColor = '#d13212'; // AWS error red
+        }
     }
 });

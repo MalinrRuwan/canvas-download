@@ -15,6 +15,7 @@ Tired of hunting through SCORM iframes for the PDF behind your course materials?
 - 🔍 **Detects PDFs automatically** — monitors network requests, so it works even when the file is loaded dynamically inside a cross-origin SCORM iframe (no URL in the page HTML).
 - 🖱️ **Floating download button** — styled to match AWS branding, injected bottom-right the moment a file is found.
 - 🗂️ **Save-as prompt** — choose where each file goes (or auto-save straight to Downloads).
+- 🔐 **Header replay for protected files** — the original request's headers (`Referer`, auth tokens, …) are captured and replayed on the download, so vaults that reject header-less requests don't fail. If the server still refuses, it retries with a cookie-authenticated `fetch()` and downloads the resulting blob.
 - 🚫 **Duplicate-safe** — only one button is ever shown, even if the same file is fetched multiple times.
 
 ## 🧠 How It Works
@@ -34,9 +35,10 @@ Tired of hunting through SCORM iframes for the PDF behind your course materials?
 The actual PDF URL is never in the module page's HTML — AWS Academy loads it dynamically inside a cross-origin SCORM player (Content Controller). So instead of parsing the DOM, the extension:
 
 1. **Background worker** listens to every network request via `webRequest`.
-2. When a request matches `.pdf` or `contentcontroller.com/vault/`, it messages the tab that made the request (using `details.tabId` — reliable even for background tabs).
+2. When a request matches `.pdf` or `contentcontroller.com/vault/`, it captures the request's headers into `storage.session` (survives worker restarts) and messages the tab that made the request (using `details.tabId` — reliable even for background tabs).
 3. **Content script** receives the URL and injects a fixed-position button.
-4. Clicking the button triggers `chrome.downloads.download()` with `saveAs: true`.
+4. Clicking the button replays the captured headers on `chrome.downloads.download()` with `saveAs: true`.
+5. If the server rejects the request, the worker retries with a `fetch()` using `credentials: 'include'` + the full header set, then downloads the blob.
 
 ## 📦 Installation
 
@@ -61,7 +63,8 @@ The actual PDF URL is never in the module page's HTML — AWS Academy loads it d
 | Permission | Why it's needed |
 |---|---|
 | `downloads` | Lets the background worker save files via `chrome.downloads.download()` |
-| `webRequest` | Monitors network traffic to catch the PDF/vault URLs |
+| `webRequest` | Monitors network traffic to catch the PDF/vault URLs **and capture their request headers** |
+| `storage` | Persists captured headers in `storage.session` so they survive service-worker restarts |
 | `<all_urls>` host access | Content Controller vault hosts can vary per course; this guarantees detection. Chrome will show a *"Read and change all your data on all websites"* warning — narrow the list in `manifest.json` if you see consistent hosts in DevTools |
 
 ## 📁 Project Structure
@@ -87,7 +90,7 @@ canvas-download/
 |---|---|
 | Button never appears | Confirm the file is a direct `.pdf` request (check DevTools → Network); some courses stream via blob URLs |
 | Button appears on every page | It's `position: fixed` — close the tab or refresh; it only exists while the content script runs |
-| Download fails | Try `saveAs: false`; some vault hosts reject unauthenticated re-fetches — keep the course tab open and logged in |
+| Download fails | The worker retries automatically with a cookie-authenticated `fetch()` — keep the course tab open and logged in. If it still fails, open the service-worker console (`chrome://extensions` → *Inspect views*) — a `401/403` means the session/token expired, so reload the module page first |
 
 ## 📄 License
 
