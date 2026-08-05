@@ -133,20 +133,32 @@ async function fetchAndDownload(url, headers) {
         throw new Error('vault returned an empty body (see content-length above)');
     }
 
-    // chrome.downloads is NOT available in content scripts — send the bytes
-    // to the background worker, which shows the save-as dialog and saves.
-    const buffer = await blob.arrayBuffer();
+    // chrome.downloads is NOT available in content scripts — send the file
+    // to the background worker for saving. IMPORTANT: raw ArrayBuffers do NOT
+    // survive chrome.runtime.sendMessage (JSON serialization turns them into
+    // {}), so build the data: URL here and send the base64 string instead.
+    const dataUrl = await blobToDataUrl(blob);
+    console.info(`[CourseDownloader] data URL ready (${dataUrl.length} chars)`);
     const reply = await chrome.runtime.sendMessage({
         action: 'save_blob',
         url,
-        data: buffer,
-        filename: guessFilename(url, resp),
-        mimeType: blob.type
+        dataUrl,
+        filename: guessFilename(url, resp)
     });
     if (!reply || !reply.ok) {
         throw new Error((reply && reply.error) || 'background failed to save the blob');
     }
     return { ok: true };
+}
+
+async function blobToDataUrl(blob) {
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    let binary = '';
+    const chunkSize = 0x8000; // 32KB chunks — avoids call-stack limits
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+        binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+    }
+    return `data:${blob.type || 'application/pdf'};base64,${btoa(binary)}`;
 }
 
 function guessFilename(url, resp) {
