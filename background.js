@@ -55,6 +55,17 @@ function toFetchInit(headerPairs) {
     return out;
 }
 
+// Service workers have no URL.createObjectURL — build a data: URL instead.
+function arrayBufferToDataUrl(buffer, mimeType) {
+    const bytes = new Uint8Array(buffer);
+    let binary = '';
+    const chunkSize = 0x8000; // 32KB chunks — avoids call-stack limits
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+        binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+    }
+    return `data:${mimeType || 'application/pdf'};base64,${btoa(binary)}`;
+}
+
 // ── 1. Capture the original request: URL + headers + frame + referer flag ───
 chrome.webRequest.onBeforeSendHeaders.addListener(
     (details) => {
@@ -119,10 +130,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 });
 
 async function saveBlob(request, tabId) {
-    const blob = new Blob([request.data], { type: request.mimeType || 'application/pdf' });
-    const objectUrl = URL.createObjectURL(blob);
+    // Service workers have NO URL.createObjectURL (it's a DOM API) — hand
+    // chrome.downloads a data: URL instead of a blob: URL.
+    const dataUrl = arrayBufferToDataUrl(request.data, request.mimeType || 'application/pdf');
     await chrome.downloads.download({
-        url: objectUrl,
+        url: dataUrl,
         filename: request.filename || 'course-material.pdf',
         saveAs: true
     });
@@ -205,9 +217,9 @@ async function downloadViaFetch(url, tabId, headers) {
             const resp = await fetch(url, { headers: init, credentials: 'include' });
             if (!resp.ok) throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
             const blob = await resp.blob();
-            const objectUrl = URL.createObjectURL(blob);
+            const dataUrl = arrayBufferToDataUrl(await blob.arrayBuffer(), blob.type || 'application/pdf');
             await chrome.downloads.download({
-                url: objectUrl,
+                url: dataUrl,
                 filename: guessFilename(url, resp),
                 saveAs: true
             });
