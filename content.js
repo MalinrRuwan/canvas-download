@@ -1,21 +1,29 @@
-// Function to inject the floating button
+// Course Material Downloader — content script.
+// Runs in the module page (top frame) AND in Content Controller frames.
+// - Top frame: shows the floating download button.
+// - Vault iframe: on request, re-fetches the file same-origin (the browser
+//   sends Referer + cookies automatically) and saves it as a blob.
+
+const BTN_ID = 'aws-custom-download-btn';
+const isTopFrame = () => window === window.top;
+
+// ── Floating button (top frame only) ─────────────────────────────────────────
 function addDownloadButton(pdfUrl) {
-    // Prevent adding multiple buttons if multiple PDFs load
-    if (document.getElementById('aws-custom-download-btn')) return;
+    if (!isTopFrame()) return; // never inject buttons into the SCORM iframe
+    if (document.getElementById(BTN_ID)) return; // duplicate-safe
 
     const btn = document.createElement('button');
-    btn.id = 'aws-custom-download-btn';
+    btn.id = BTN_ID;
     btn.innerHTML = '📥 Download Course PDF';
 
-    // Style the button so it floats clearly over the course material
     btn.style.cssText = `
         position: fixed;
         bottom: 30px;
         right: 30px;
-        z-index: 2147483647; /* Maximum z-index */
+        z-index: 2147483647;
         padding: 15px 25px;
-        background-color: #ff9900; /* AWS Orange */
-        color: #232f3e; /* AWS Dark Gray */
+        background-color: #ff9900;
+        color: #232f3e;
         border: 2px solid #232f3e;
         border-radius: 8px;
         cursor: pointer;
@@ -28,39 +36,91 @@ function addDownloadButton(pdfUrl) {
 
     const setText = (t) => { btn.innerHTML = t; };
 
-    // Add hover effects
     btn.onmouseover = () => { btn.style.transform = 'scale(1.05)'; };
     btn.onmouseout = () => { btn.style.transform = 'scale(1)'; };
 
-    // When clicked, tell the background script to download the file
-    // (the background worker replays the original request headers — the
-    // vault rejects header-less downloads)
     btn.addEventListener('click', () => {
         setText('⏳ Downloading...');
         chrome.runtime.sendMessage({ action: 'download', url: pdfUrl })
             .then((resp) => {
-                if (!resp || !resp.ok) setText('⚠️ Failed to start download');
-                else setTimeout(() => setText('📥 Download Course PDF'), 15000);
+                if (resp && resp.ok) {
+                    // Background sends download_done / download_error events too.
+                    setTimeout(() => setText('📥 Download Course PDF'), 20000);
+                } else {
+                    const err = (resp && resp.error) || 'unknown error';
+                    console.error('[CourseDownloader] failed to start:', err);
+                    failButton(err);
+                }
             })
-            .catch(() => setText('⚠️ Failed to start download'));
+            .catch((err) => {
+                // "Extension context invalidated" → page must be refreshed
+                // after the extension is reloaded.
+                console.error('[CourseDownloader] message error:', err);
+                failButton(String(err));
+            });
     });
 
     document.body.appendChild(btn);
 }
 
-// Listen for messages from the background script
-chrome.runtime.onMessage.addListener((request) => {
+function failButton(err) {
+    const btn = document.getElementById(BTN_ID);
+    if (!btn) return;
+    btn.innerHTML = '⚠️ Failed — see console';
+    btn.style.backgroundColor = '#d13212';
+    btn.title = err; // hover to see the full error
+}
+
+// ── Messages ─────────────────────────────────────────────────────────────────
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === 'found_pdf') {
-        // The background script found the PDF URL in the network traffic
         addDownloadButton(request.url);
+    } else if (request.action === 'fetch_and_download' && request.url) {
+        // Sent by the background with {frameId} targeting this vault frame.
+        fetchAndDownload(request.url, request.headers || [])
+            .then((r) => sendResponse(r))
+            .catch((err) => sendResponse({ ok: false, error: String(err) }));
+        return true; // async response
     } else if (request.action === 'download_done') {
-        const btn = document.getElementById('aws-custom-download-btn');
-        if (btn) btn.innerHTML = '✅ Saved — check your downloads';
-    } else if (request.action === 'download_error') {
-        const btn = document.getElementById('aws-custom-download-btn');
+        const btn = document.getElementById(BTN_ID);
         if (btn) {
-            btn.innerHTML = '⚠️ Download failed — see console';
-            btn.style.backgroundColor = '#d13212'; // AWS error red
+            btn.innerHTML = '✅ Saved — check your downloads';
+            btn.style.backgroundColor = '#1a7f37';
         }
+    } else if (request.action === 'download_error') {
+        console.error('[CourseDownloader]', request.error);
+        failButton(request.error || 'download failed');
     }
 });
+
+// Same-origin fetch inside the vault iframe: the browser attaches the
+// Referer and cookies the server expects, and we replay custom tokens.
+async function fetchAndDownload(url, headers) {
+    const resp = await fetch(url, { headers, credentials: 'include' });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
+    const blob = await resp.blob();
+    const objectUrl = URL.createObjectURL(blob);
+    await chrome.downloads.download({
+        url: objectUrl,
+        filename: guessFilename(url, resp),
+        saveAs: true
+    });
+    return { ok: true };
+}
+
+function guessFilename(url, resp) {
+    const cd = resp && resp.headers && resp.headers.get
+        ? resp.headers.get('content-disposition')
+        : null;
+    const m = cd && cd.match(/filename\*?=(?:UTF-8'')?"?([^";]+)/i);
+    if (m) return decodeURIComponent(m[1].replace(/"/g, ''));
+
+    try {
+        const path = new URL(url).pathname;
+        const name = decodeURIComponent(path.split('/').filter(Boolean).pop() || '');
+        if (!name) return 'course-material.pdf';
+        return name.endsWith('.pdf') ? name : `${name}.pdf`;
+    } catch {
+        return 'course-material.pdf';
+    }
+}

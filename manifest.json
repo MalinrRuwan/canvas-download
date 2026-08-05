@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Course Material Downloader",
-  "version": "1.1",
+  "version": "1.2",
   "description": "Automatically adds a download button when course PDFs are detected on Canvas/Instructure pages.",
   "permissions": [
     "downloads",
@@ -19,6 +19,11 @@
   "content_scripts": [
     {
       "matches": ["*://awsacademy.instructure.com/courses/*/modules/items/*"],
+      "js": ["content.js"],
+      "all_frames": true
+    },
+    {
+      "matches": ["*://*.contentcontroller.com/*"],
       "js": ["content.js"],
       "all_frames": true
     }

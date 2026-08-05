@@ -34,11 +34,12 @@ Tired of hunting through SCORM iframes for the PDF behind your course materials?
 
 The actual PDF URL is never in the module page's HTML — AWS Academy loads it dynamically inside a cross-origin SCORM player (Content Controller). So instead of parsing the DOM, the extension:
 
-1. **Background worker** listens to every network request via `webRequest`.
-2. When a request matches `.pdf` or `contentcontroller.com/vault/`, it captures the request's headers into `storage.session` (survives worker restarts) and messages the tab that made the request (using `details.tabId` — reliable even for background tabs).
-3. **Content script** receives the URL and injects a fixed-position button.
-4. Clicking the button replays the captured headers on `chrome.downloads.download()` with `saveAs: true`.
-5. If the server rejects the request, the worker retries with a `fetch()` using `credentials: 'include'` + the full header set, then downloads the blob.
+1. **Background worker** listens to every network request via `webRequest`, captures the request's headers and frame into `storage.session`, and messages the tab that made the request (using `details.tabId` — reliable even for background tabs).
+2. **Content script** receives the URL and injects a fixed-position button.
+3. Clicking the button tries three download paths in order:
+   - **Native** — `chrome.downloads.download()` with replayed headers (only headers XHR allows — `Referer`/`Origin`/`Sec-*` are rejected by the API, so they're filtered out).
+   - **Iframe re-fetch** — the vault iframe re-fetches the file same-origin, where the browser attaches `Referer` + cookies automatically, then saves the blob.
+   - **Worker fetch** — `fetch()` with `credentials: 'include'` + replayed headers, saved as a blob.
 
 ## 📦 Installation
 
@@ -90,7 +91,7 @@ canvas-download/
 |---|---|
 | Button never appears | Confirm the file is a direct `.pdf` request (check DevTools → Network); some courses stream via blob URLs |
 | Button appears on every page | It's `position: fixed` — close the tab or refresh; it only exists while the content script runs |
-| Download fails | The worker retries automatically with a cookie-authenticated `fetch()` — keep the course tab open and logged in. If it still fails, open the service-worker console (`chrome://extensions` → *Inspect views*) — a `401/403` means the session/token expired, so reload the module page first |
+| Download fails | Three-tier fallback: native download → re-fetch from inside the SCORM iframe (where `Referer` is sent automatically) → worker `fetch()`. Keep the course tab open and logged in. If it still fails, open the service-worker console (`chrome://extensions` → *Inspect views*) — `[CourseDownloader]` logs show exactly which tier failed and why |
 
 ## 📄 License
 
