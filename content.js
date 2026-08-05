@@ -104,12 +104,37 @@ function toFetchInit(headerPairs) {
 }
 
 async function fetchAndDownload(url, headers) {
-    const resp = await fetch(url, { headers: toFetchInit(headers), credentials: 'include' });
+    const init = {
+        headers: toFetchInit(headers),
+        credentials: 'include',
+        cache: 'no-store' // never serve a cached empty body for this vault URL
+    };
+
+    let resp = await fetch(url, init);
+    // Server claims zero bytes → likely a transient/cached empty response; retry once.
+    const len = resp.headers.get('content-length');
+    if (resp.ok && len !== null && Number(len) === 0) {
+        console.warn('[CourseDownloader] content-length: 0 — retrying once');
+        await new Promise((r) => setTimeout(r, 750));
+        resp = await fetch(url, init);
+    }
+
+    console.info(
+        `[CourseDownloader] iframe fetch → ${resp.status} ` +
+        `content-length: ${resp.headers.get('content-length')} ` +
+        `type: ${resp.headers.get('content-type')} ` +
+        `final: ${resp.url.slice(0, 140)}`
+    );
     if (!resp.ok) throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
+
+    const blob = await resp.blob();
+    console.info(`[CourseDownloader] iframe fetch body: ${blob.size} bytes`);
+    if (blob.size === 0) {
+        throw new Error('vault returned an empty body (see content-length above)');
+    }
 
     // chrome.downloads is NOT available in content scripts — send the bytes
     // to the background worker, which shows the save-as dialog and saves.
-    const blob = await resp.blob();
     const buffer = await blob.arrayBuffer();
     const reply = await chrome.runtime.sendMessage({
         action: 'save_blob',

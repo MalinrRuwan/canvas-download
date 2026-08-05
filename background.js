@@ -130,9 +130,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 });
 
 async function saveBlob(request, tabId) {
+    if (!request.data || request.data.byteLength === 0) {
+        throw new Error('worker received 0 bytes from the iframe fetch');
+    }
+    console.info(`[CourseDownloader] saving ${request.data.byteLength} bytes as ${request.filename}`);
     // Service workers have NO URL.createObjectURL (it's a DOM API) — hand
     // chrome.downloads a data: URL instead of a blob: URL.
     const dataUrl = arrayBufferToDataUrl(request.data, request.mimeType || 'application/pdf');
+    console.info(`[CourseDownloader] data URL length: ${dataUrl.length}`);
     await chrome.downloads.download({
         url: dataUrl,
         filename: request.filename || 'course-material.pdf',
@@ -214,7 +219,7 @@ async function downloadViaFetch(url, tabId, headers) {
     // C) Worker fetch — cookies + replayable headers, but NO Referer.
     for (const init of [toFetchInit(headers), {}]) {
         try {
-            const resp = await fetch(url, { headers: init, credentials: 'include' });
+            const resp = await fetch(url, { headers: init, credentials: 'include', cache: 'no-store' });
             if (!resp.ok) throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
             const blob = await resp.blob();
             const dataUrl = arrayBufferToDataUrl(await blob.arrayBuffer(), blob.type || 'application/pdf');
